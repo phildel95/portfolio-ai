@@ -1,10 +1,13 @@
-import streamlit as st
-import pandas as pd
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from core.indicators import trend_score, volatility
 from core.risk_engine import risk_score
 from core.decision_engine import recommendation
 from core.portfolio_engine import get_prices
+
 
 st.set_page_config(page_title="IA Boursier", layout="wide")
 
