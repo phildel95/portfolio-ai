@@ -1,14 +1,13 @@
 import streamlit as st
 
-# ⚠️ DOIT être la première commande Streamlit
-st.set_page_config(page_title="IA Boursier", layout="wide")
+# ⚠️ Première commande Streamlit
+st.set_page_config(page_title="IA Boursier V2", layout="wide")
 
 import sys
 import os
 import pandas as pd
-import yfinance as yf
 
-# 🔧 permet de trouver le dossier core/
+# accès dossier racine
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from core.indicators import trend_score, volatility
@@ -16,89 +15,246 @@ from core.risk_engine import risk_score
 from core.decision_engine import recommendation
 from core.portfolio_engine import get_prices
 
-
-# ----------------------------
+# ---------------------------------
 # TITRE
-# ----------------------------
-st.title("📊 Copilote IA Boursier")
+# ---------------------------------
+st.title("📊 Copilote IA Boursier — V2")
 
-# ----------------------------
-# MODE IA
-# ----------------------------
-mode = st.selectbox(
-    "🎛️ Mode de recommandation",
-    ["defensif", "equilibre", "dynamique"]
-)
+st.caption("Analyse portefeuille • pondération réelle • récupération de cash • IA hybride")
 
-# ----------------------------
-# UPLOAD PORTFOLIO
-# ----------------------------
-file = st.file_uploader("📥 Import portefeuille CSV", type=["csv"])
+# ---------------------------------
+# SIDEBAR
+# ---------------------------------
+with st.sidebar:
+    st.header("⚙️ Paramètres")
 
-if file:
+    mode = st.selectbox(
+        "🎛️ Mode IA",
+        ["defensif", "equilibre", "dynamique"]
+    )
 
-    df = pd.read_csv(file)
+    cash_target = st.selectbox(
+        "💰 Objectif cash à récupérer",
+        [0, 250, 500, 1000, 2000],
+        index=0
+    )
 
-    st.subheader("📦 Portefeuille importé")
-    st.dataframe(df)
+# ---------------------------------
+# UPLOAD
+# ---------------------------------
+file = st.file_uploader("📥 Importer votre portefeuille CSV", type=["csv"])
 
-    # ----------------------------
-    # PRIX DU MARCHE
-    # ----------------------------
-    tickers = df["Ticker"].tolist()
+if not file:
+    st.info("Importez un fichier CSV avec colonnes : Ticker, Quantité, Prix_Achat")
+    st.stop()
+
+# ---------------------------------
+# LECTURE CSV
+# ---------------------------------
+df = pd.read_csv(file)
+
+required_cols = {"Ticker", "Quantité", "Prix_Achat"}
+if not required_cols.issubset(df.columns):
+    st.error("Le fichier doit contenir : Ticker, Quantité, Prix_Achat")
+    st.stop()
+
+# nettoyage simple
+df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+df["Quantité"] = pd.to_numeric(df["Quantité"], errors="coerce")
+df["Prix_Achat"] = pd.to_numeric(df["Prix_Achat"], errors="coerce")
+df = df.dropna()
+
+# ---------------------------------
+# PRIX MARCHÉ
+# ---------------------------------
+tickers = df["Ticker"].tolist()
+
+with st.spinner("📡 Récupération des cours..."):
     data = get_prices(tickers)
 
-    latest_prices = data.iloc[-1]
+# si un seul ticker
+if len(tickers) == 1:
+    data = pd.DataFrame(data)
 
-    df["Prix_Actuel"] = df["Ticker"].map(latest_prices)
-    df["Valeur"] = df["Quantité"] * df["Prix_Actuel"]
-    df["Perf_%"] = ((df["Prix_Actuel"] - df["Prix_Achat"]) / df["Prix_Achat"]) * 100
+latest_prices = data.iloc[-1]
 
-    # ----------------------------
-    # IA HYBRIDE
-    # ----------------------------
-    scores = []
-    recos = []
+# ---------------------------------
+# CALCULS
+# ---------------------------------
+df["Prix_Actuel"] = df["Ticker"].map(latest_prices)
+df = df.dropna(subset=["Prix_Actuel"])
 
-    for t in tickers:
-        hist = data[t].dropna()
+df["Valeur"] = df["Quantité"] * df["Prix_Actuel"]
+df["Investi"] = df["Quantité"] * df["Prix_Achat"]
+df["Gain_€"] = df["Valeur"] - df["Investi"]
+df["Perf_%"] = ((df["Prix_Actuel"] - df["Prix_Achat"]) / df["Prix_Achat"]) * 100
 
-        tr = trend_score(hist)
-        vol = volatility(hist)
-        perf = df[df["Ticker"] == t]["Perf_%"].values[0]
+total = df["Valeur"].sum()
+df["Poids_%"] = (df["Valeur"] / total) * 100
 
-        score = risk_score(perf, vol) + tr
-        scores.append(score)
+# ---------------------------------
+# IA HYBRIDE
+# ---------------------------------
+scores = []
+recos = []
+vols = []
+trends = []
 
-        recos.append(recommendation(score, mode))
+for t in df["Ticker"]:
+    hist = data[t].dropna()
 
-    df["Score_IA"] = scores
-    df["Recommandation"] = recos
+    tr = trend_score(hist)
+    vol = volatility(hist)
 
-    # ----------------------------
-    # VUE SIMPLE
-    # ----------------------------
-    st.subheader("🟢 Vue simple")
+    perf = df.loc[df["Ticker"] == t, "Perf_%"].values[0]
 
-    col1, col2, col3 = st.columns(3)
+    score = risk_score(perf, vol) + tr
 
-    col1.metric("Valeur portefeuille", f"{df['Valeur'].sum():.2f} €")
-    col2.metric("Perf moyenne", f"{df['Perf_%'].mean():.2f} %")
-    col3.metric("Positions", len(df))
+    trends.append(tr)
+    vols.append(vol)
+    scores.append(score)
+    recos.append(recommendation(score, mode))
 
-    st.dataframe(df[["Ticker", "Valeur", "Perf_%", "Recommandation"]])
+df["Trend"] = trends
+df["Volatilité"] = vols
+df["Score_IA"] = scores
+df["Recommandation"] = recos
 
-    # ----------------------------
-    # VUE AVANCEE
-    # ----------------------------
-    with st.expander("🔵 Vue avancée (IA détaillée)"):
+# ---------------------------------
+# KPIs
+# ---------------------------------
+st.subheader("📌 Synthèse")
 
-        st.dataframe(df)
+c1, c2, c3, c4 = st.columns(4)
 
-        st.write("📊 Lecture IA :")
-        st.write("- Score IA = tendance + risque + performance")
-        st.write("- Mode influence les décisions")
-        st.write("- Volatilité impacte le risque")
+c1.metric("💼 Valeur totale", f"{total:,.2f} €")
+c2.metric("💸 Investi", f"{df['Investi'].sum():,.2f} €")
+c3.metric("📈 Gain total", f"{df['Gain_€'].sum():,.2f} €")
+c4.metric("📦 Positions", len(df))
 
-else:
-    st.info("📥 Importez un fichier CSV pour commencer")
+# ---------------------------------
+# ALLOCATION
+# ---------------------------------
+st.subheader("📊 Allocation réelle")
+
+alloc = df[["Ticker", "Valeur", "Poids_%"]].sort_values("Poids_%", ascending=False)
+
+st.dataframe(
+    alloc.style.format({
+        "Valeur": "{:,.2f} €",
+        "Poids_%": "{:.2f}%"
+    }),
+    use_container_width=True
+)
+
+st.bar_chart(alloc.set_index("Ticker")["Poids_%"])
+
+# ---------------------------------
+# ALERTES
+# ---------------------------------
+st.subheader("⚠️ Alertes portefeuille")
+
+heavy = df[df["Poids_%"] > 15]
+micro = df[df["Poids_%"] < 1]
+
+if not heavy.empty:
+    st.warning("Positions concentrées (>15%) : " + ", ".join(heavy["Ticker"]))
+
+if not micro.empty:
+    st.info("Micro-lignes (<1%) : " + ", ".join(micro["Ticker"]))
+
+if heavy.empty and micro.empty:
+    st.success("Allocation équilibrée.")
+
+# ---------------------------------
+# TABLEAU PRINCIPAL
+# ---------------------------------
+st.subheader("🧠 Analyse IA")
+
+view = df[[
+    "Ticker",
+    "Valeur",
+    "Poids_%",
+    "Perf_%",
+    "Gain_€",
+    "Score_IA",
+    "Recommandation"
+]].sort_values("Valeur", ascending=False)
+
+st.dataframe(
+    view.style.format({
+        "Valeur": "{:,.2f} €",
+        "Poids_%": "{:.2f}%",
+        "Perf_%": "{:.2f}%",
+        "Gain_€": "{:,.2f} €"
+    }),
+    use_container_width=True
+)
+
+# ---------------------------------
+# RECUP CASH INTELLIGENTE
+# ---------------------------------
+if cash_target > 0:
+    st.subheader(f"💰 Plan IA pour récupérer {cash_target} €")
+
+    # ordre logique :
+    # 1 micro lignes
+    # 2 recommandations réduire/sortir
+    # 3 plus grosses pondérations
+
+    cash_df = df.copy()
+
+    priority = []
+
+    for _, row in cash_df.iterrows():
+        score = 0
+
+        if row["Poids_%"] < 1:
+            score += 5
+
+        if "Sortir" in row["Recommandation"]:
+            score += 4
+
+        if "Réduire" in row["Recommandation"]:
+            score += 3
+
+        score += row["Poids_%"] / 5
+
+        priority.append(score)
+
+    cash_df["Priority"] = priority
+    cash_df = cash_df.sort_values("Priority", ascending=False)
+
+    selected = []
+    running = 0
+
+    for _, row in cash_df.iterrows():
+        if running >= cash_target:
+            break
+
+        selected.append(row)
+        running += row["Valeur"]
+
+    if selected:
+        plan = pd.DataFrame(selected)[[
+            "Ticker",
+            "Valeur",
+            "Poids_%",
+            "Recommandation"
+        ]]
+
+        st.dataframe(
+            plan.style.format({
+                "Valeur": "{:,.2f} €",
+                "Poids_%": "{:.2f}%"
+            }),
+            use_container_width=True
+        )
+
+        st.success(f"Cash estimé récupérable : {running:,.2f} €")
+
+# ---------------------------------
+# DETAILS
+# ---------------------------------
+with st.expander("🔵 Vue avancée"):
+    st.dataframe(df, use_container_width=True)
